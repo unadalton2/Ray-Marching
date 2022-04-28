@@ -1,0 +1,166 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+
+struct Shape {
+    int shapeType;
+    float3 pos;
+    float3 Scale;
+    float3 Rotation;
+    int operation;
+};
+struct Ray {
+    float3 origin;
+    float3 direction;
+};
+
+int Iterations;
+
+StructuredBuffer<Shape> shapes;
+int numShapes;
+
+
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+
+Ray CreateRay(float3 origin, float3 direction) {
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+Ray CreateRayFromCamera(float2 uv) {
+    float3 origin = mul(_CameraToWorld, float4(0, 0, 0, 1)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0, 1)).xyz;
+    direction = normalize(mul(_CameraToWorld, float4(direction, 0)).xyz);
+    return CreateRay(origin, direction);
+}
+//CubeDist and smin from https://iquilezles.org/ by Inigo Quilez
+float CubeDist(float3 p, float3 b) {
+    float3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+
+float2 smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * (1.0 / 4.0);
+}
+
+
+float4 GetDist(float3 origin) {
+
+    float3 z = origin;
+
+    
+    int i = 0;
+    while (i < Iterations+1) {
+        i++;
+        int power = pow(3, Iterations - i);
+
+        z = abs(z);
+        z -= float3(1, 1, 1) * power;
+
+        {
+            z.z += 0.5 * power;
+            float3 n1 = normalize(float3(-1, 1, 0));
+            z -= 2.0 * min(0.0, dot(z, n1)) * n1;
+            z.x += 0.5 * power;
+
+            n1 = normalize(float3(-1, 0, 1));
+            z -= 2.0 * min(0.0, dot(z, n1)) * n1;
+            z.z -= 0.5 * power;
+
+            z.x = abs(z.x);
+            z.x -= 0.5 * power;
+        }
+    }
+
+
+    float dist = CubeDist(z, float3(0.5, 0.5, 0.5));
+
+    float3 r = float3(1,4,6);
+
+
+    return float4(1, 0.4, 1, dist);
+}
+
+float calcLight(float3 p, float3 lightDir) {
+    
+    float3 surface = p;
+
+    float3 sufaceNormal = normalize(GetDist(surface).w-float3(GetDist(surface+float3(0.005,0,0)).w, GetDist(surface+float3(0,0.005,0)).w, GetDist(surface+float3(0,0,0.005)).w));
+
+    float light = saturate(saturate(dot(lightDir, -sufaceNormal)));
+
+    float brightness = 1;
+
+    
+    p += lightDir *0.05;
+
+    int march = 0;
+    float DistTraveled = 0;
+    float minDist = 100000;
+    while (march < 75 && DistTraveled < 1000) {
+        march++;
+        float4 dist = GetDist(p);
+        DistTraveled += dist;
+        minDist = min(minDist, 10 * dist / march);
+
+        p += lightDir * dist.w;
+
+        brightness = min(brightness,dist*200);
+
+        if (dist.w < 0.01) {
+            return 0.2;
+        }
+
+    }
+
+    
+    return (0.2 + 0.8*brightness)*light; 
+
+}
+
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+
+    float2 uv = id.xy / float2(width, height) * 2 - 1;
+
+    Ray ray = CreateRayFromCamera(uv);
+    float3 col = (1, 1, 1);
+
+    uint march = 0;
+    float DistTraveled = 0;
+    float brightness = 1;
+    while (march < 250 && DistTraveled < 10000000) {
+        march++;
+        float4 Dist = GetDist(ray.origin);
+        DistTraveled += Dist.w;
+
+        ray.direction.xy += 0.0001*sin(id.xy*100*mul(_CameraToWorld, float4(0, 0, 0, 1)).x);
+        ray.origin += ray.direction * Dist.w;
+
+        brightness *= clamp(Dist.w, 0.97*Iterations, Iterations)/Iterations;
+        col = col *0.995 + Dist.xzy*0.003;
+
+        if (abs(Dist.w) < 0.01*pow(3, Iterations)*DistTraveled/pow(6, Iterations)) {
+            col.rbg = Dist.xyz * brightness;
+            col.rbg *= calcLight(ray.origin, normalize(float3(0.5, 1, 1)));
+            break;
+        }
+
+
+    }
+
+
+    Result[id.xy] = float4(col, 1);
+}
